@@ -1,0 +1,72 @@
+# main.py
+import os
+import datetime
+import base64
+import paho.mqtt.client as mqtt
+from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime
+from sqlalchemy.orm import declarative_base, sessionmaker
+from models import Base, Image
+
+# === Base de données ===
+engine = create_engine("sqlite.db")
+Base.metadata.create_all(engine)
+Session = sessionmaker(bind=engine)
+session = Session()
+
+# === MQTT setup ===
+BROKER = "localhost"
+TOPIC = "michoir/image"
+client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+
+# === Dossier de sauvegarde des images ===
+SAVE_DIR = "images"
+os.makedirs(SAVE_DIR, exist_ok=True)
+
+# === Variables pour reconstruire l'image ===
+current_image_data = bytearray()
+
+# === Callbacks MQTT ===
+def on_connect(client, userdata, flags, reason_code, properties):
+    if reason_code == 0:
+        print("Connecté au broker MQTT !")
+        client.subscribe(TOPIC)
+    else:
+        print("Erreur connexion MQTT, code:", reason_code)
+
+def on_message(client, userdata, msg):
+    global current_image_data
+    try:
+        fragment = base64.b64decode(msg.payload)
+        current_image_data.extend(fragment)
+    except Exception as e:
+        print("Erreur décodage fragment:", e)
+        return
+
+    # Détecte le dernier fragment (plus petit que chunk max envoyé)
+    if len(msg.payload) < 1400:  # chunk max côté ESP32
+        filename = datetime.datetime.now().strftime("%Y%m%d_%H%M%S") + ".jpg"
+        filepath = os.path.join(SAVE_DIR, filename)
+
+        try:
+            with open(filepath, "wb") as f:
+                f.write(current_image_data)
+            print(f"Image sauvegardée: {filepath}")
+        except Exception as e:
+            print("Erreur écriture fichier:", e)
+
+        # Sauvegarde dans la base SQL
+        img_record = Image(image_path=filepath)
+        session.add(img_record)
+        session.commit()
+
+        # Réinitialise pour la prochaine image
+        current_image_data = bytearray()
+
+# === Connexion MQTT ===
+client.on_connect = on_connect
+client.on_message = on_message
+client.connect(BROKER, 1883, 60)
+
+print("Serveur MQTT en écoute...")
+# === Boucle principale MQTT ===
+client.loop_forever()
